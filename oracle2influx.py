@@ -6,8 +6,10 @@
 import argparse
 
 import obspy
+import time
 
 from config import *
+from utils import *
 import cx_Oracle
 
 from influxdb_client import InfluxDBClient
@@ -40,6 +42,8 @@ class OracleInfluxClient:
         except cx_Oracle.DatabaseError:
             print('Connection error for the Oracle Client')
 
+        print(self.stations)
+
         self.server_influx = server_influx_url
         self.bucket = bucket
         self.token = token
@@ -54,181 +58,146 @@ class OracleInfluxClient:
 
         self.write_api = self.client_influx.write_api(SYNCHRONOUS)
 
+        self.xat_timestamp = None
+        self.soh1_timestamp = None
+        self.soh2_timestamp = None
+        self.soh3_timestamp = None
+
     def write_data_influx(self):
         try:
             for sta in self.stations:
-
+                t_start = obspy.UTCDateTime()
+                data = []
                 self.cursor.execute(f'SELECT * FROM {TABLE_ORACLE_XAT} WHERE '
                                     f'STATION_NAME=:sta AND IS_DATA=:data ORDER BY TIME DESC',
                                     sta=sta, data='Data')
+
                 for row in self.cursor:
 
-                    timestamp = row[0]
+                    timestamp = int(row[0].timestamp() * 1e3)
 
-                    vault0_temperature = row[3]
-                    vault0_humidity = row[4]
-                    vault1_temperature = row[5]
-                    vault1_humidity = row[6]
-                    seismometer_temperature = row[7]
-                    outside_temperature = row[8]
-                    vpn_voltage = row[9]
-                    vpn_current = row[10]
-                    telemeter_voltage = row[11]
-                    telemeter_current = row[12]
-                    digitizer_voltage = row[13]
-                    digitizer_current = row[14]
-                    computer_voltage = row[15]
-                    computer_current = row[16]
-                    device_voltage = row[20]
-                    device_current = row[21]
                     sensor1_value_base2 = base10_to_base2_str(row[19])
-                    sensor1_value = [sensor1_value_base2[0], sensor1_value_base2[1],
-                                     'open' if sensor1_value_base2[2] == '1' else 'close',
-                                     'open' if sensor1_value_base2[3] == '1' else 'close', sensor1_value_base2[4],
-                                     sensor1_value_base2[5], sensor1_value_base2[6], sensor1_value_base2[7]]
 
-
-                    states_data += f"""
-
-                    <state name='Saxiul XAT' datetime='{dt}' value='{sensor1_value[0]}' problem='0'/>
-                    <state name='Water XAT' datetime='{dt}' value='{sensor1_value[1]}' problem='0'/>
-                    <state name='Door 1 XAT' datetime='{dt}' value='{sensor1_value[2]}' problem='0'/>
-                    <state name='Door 2 XAT' datetime='{dt}' value='{sensor1_value[3]}' problem='0'/>
-                    <state name='Loop XAT' datetime='{dt}' value='{sensor1_value[5]}' problem='0'/>
-                    """
+                    data.append({
+                        "measurement": "HEALTH_STATES_XAT",
+                        "tags": {"location": sta},
+                        "fields": {
+                            "vault0_temperature": float(row[3] if row[3] is not None else 0.0),
+                            "vault0_humidity": float(row[4] if row[4] is not None else 0.0),
+                            "vault1_temperature": float(row[5]) if row[5] is not None else 0.0,
+                            "vault1_humidity": float(row[6]) if row[6] is not None else 0.0,
+                            "seismometer_temperature": float(row[7]) if row[7] is not None else 0.0,
+                            "outside_temperature": float(row[8]) if row[8] is not None else 0.0,
+                            "vpn_voltage": float(row[9]) if row[9] is not None else 0.0,
+                            "vpn_current": float(row[10]) if row[10] is not None else 0.0,
+                            "telemeter_voltage": float(row[11]) if row[11] is not None else 0.0,
+                            "telemeter_current": float(row[12]) if row[12] is not None else 0.0,
+                            "digitizer_voltage": float(row[13]) if row[13] is not None else 0.0,
+                            "digitizer_current": float(row[14]) if row[14] is not None else 0.0,
+                            "computer_voltage": float(row[15]) if row[15] is not None else 0.0,
+                            "computer_current": float(row[16]) if row[16] is not None else 0.0,
+                            "device_voltage": float(row[20]) if row[20] is not None else 0.0,
+                            "device_current": float(row[21]) if row[21] is not None else 0.0,
+                            "saxiul": int(sensor1_value_base2[0]),
+                            "water_presence": int(sensor1_value_base2[1]),
+                            "door_1": int(sensor1_value_base2[2]),
+                            "door_2": int(sensor1_value_base2[3]),
+                            "loop": int(sensor1_value_base2[5]),
+                        },
+                        "time": timestamp
+                    })
 
                     break  # to leave the current cursor after getting the last value
 
                 self.cursor.execute(f'SELECT * FROM {TABLE_ORACLE_SOH[0]} WHERE STATION=:sta ORDER BY DATE1 DESC',
                                     sta=sta)
                 for row in self.cursor:
-                    timestamp = row[1]
-                    used_disksize = row[2]
-                    available_disksize = row[3]
-                    total_disksize = row[4]
+                    timestamp = int(row[1].timestamp() * 1e3)
+
+                    data.append({
+                        "measurement": f"HEALTH_STATES_{TABLE_ORACLE_SOH[0]}",
+                        "tags": {"location": sta},
+                        "fields": {
+                            "used_disksize": int(row[2]),
+                            "available_disksize": int(row[3]),
+                            "total_disksize": int(row[4]),
+
+                        },
+                        "time": timestamp
+                    })
 
                     break  # to leave the current cursor after getting the last value
 
                 self.cursor.execute(f'SELECT * FROM {TABLE_ORACLE_SOH[1]} WHERE STATION=:sta ORDER BY DATE1 DESC',
                                     sta=sta)
                 for row in self.cursor:
-                    timestamp = row[1]
-                    e_massposition = row[2]
-                    n_massposition = row[3]
-                    z_massposition = row[4]
+                    timestamp = int(row[1].timestamp() * 1e3)
 
+                    data.append({
+                        "measurement": f"HEALTH_STATES_{TABLE_ORACLE_SOH[1]}",
+                        "tags": {"location": sta},
+                        "fields": {
+                            "e_massposition": float(row[2]),
+                            "n_massposition": float(row[3]),
+                            "z_massposition": float(row[4]),
+
+                        },
+                        "time": timestamp
+                    })
 
                     break  # to leave the current cursor after getting the last value
 
                 self.cursor.execute(f'SELECT * FROM {TABLE_ORACLE_SOH[2]} WHERE STATION=:sta ORDER BY DATE1 DESC',
                                     sta=sta)
                 for row in self.cursor:
-                    timestamp = row[3]
-                    battery_voltage = row[1]
-                    temperature = row[2]
+                    timestamp = int(row[3].timestamp() * 1e3)
 
+                    data.append({
+                        "measurement": f"HEALTH_STATES_{TABLE_ORACLE_SOH[2]}",
+                        "tags": {"location": sta},
+                        "fields": {
+                            "battery_voltage": float(row[1]),
+                            "temperature": float(row[2]),
+                        },
+                        "time": timestamp
+                    })
 
                     break
 
-                states_data += f"</station>"
-
-                self.cursor.execute(f'SELECT * FROM {TABLE_ORACLE_XAT} WHERE '
-                                    f'STATION_NAME=:sta AND IS_DATA=:data ORDER BY TIME DESC',
-                                    sta=sta, data='Alarm')
+                # self.cursor.execute(f'SELECT * FROM {TABLE_ORACLE_XAT} WHERE '
+                #                     f'STATION_NAME=:sta AND IS_DATA=:data ORDER BY TIME DESC',
+                #                     sta=sta, data='Alarm')
                 # for row in self.cursor:
                 #     timestamp = row[0]
                 #     alarm = row[20]
                 #     if alarm is not None:
                 #         self.analyze_alarm(sta, alarm, dt)
                 #     break  # to leave the current cursor after getting the last value
+                try:
 
+                    self.write_api.write(self.bucket, self.org, record=data, write_precision=WritePrecision.MS)
+                    t_stop = obspy.UTCDateTime()
+                    print(f'Oracle data of {sta} sent to {self.bucket} in {t_stop - t_start}s')
+                except Exception as e:
+                    print(e)
+                    print(f'Oracle data of {sta} not sent to {self.bucket}.')
+                    pass
+
+            return True
 
         except cx_Oracle.DatabaseError:
             print('Request is false.')
-
-        # tr.resample(sampling_rate=25.0)
-        t_start = obspy.UTCDateTime()
-        tr.detrend(type='constant')
-
-        if tr is not None:
-            if tr.stats.location == '':
-                station = tr.stats.network + '.' + tr.stats.station + '.' + tr.stats.channel
-            else:
-                station = tr.stats.network + '.' + tr.stats.station + '.' + tr.stats.location + '.' + tr.stats.channel
-
-            data = []
-            timestamp_start = int(tr.stats.starttime.timestamp * 1e3)
-            for i, seismic_point in enumerate(tr.data):
-                timestamp = timestamp_start + i * int(tr.stats.delta * 1e3)
-                data.append({
-                    "measurement": "SEISMIC_DATA",
-                    "tags": {"location": station},
-                    "fields": {
-                        "trace": int(seismic_point),
-                    },
-                    "time": timestamp
-                })
-
-            self.write_api.write(self.bucket, self.org, record=data, write_precision=WritePrecision.MS)
-            t_stop = obspy.UTCDateTime()
-
-            print(f'{station} sent to {self.bucket} in {t_stop-t_start}s')
-
-        else:
-            print("blockette contains no trace")
+            return False
 
     def run(self):
-        for station in self.streams:
-            full_sta_name = station.split('.')
-            net = full_sta_name[0]
-            sta = full_sta_name[1]
-            cha = full_sta_name[2] + full_sta_name[3]
-            self.select_stream(net, sta, cha)
         while True:
 
-            data = self.conn.collect()
-
-            if data == SLPacket.SLTERMINATE:
-                self.on_terminate()
-                continue
-            elif data == SLPacket.SLERROR:
-                self.on_seedlink_error()
-                continue
-
-            # At this point the received data should be a SeedLink packet
-            # XXX In SLClient there is a check for data == None, but I think
-            #     there is no way that self.conn.collect() can ever return None
-            assert(isinstance(data, SLPacket))
-
-            packet_type = data.get_type()
-
-            # Ignore in-stream INFO packets (not supported)
-            if packet_type not in (SLPacket.TYPE_SLINF, SLPacket.TYPE_SLINFT):
-                # The packet should be a data packet
-                trace = data.get_trace()
-                # Pass the trace to the on_data callback
-                self.on_data(trace)
-
-    def on_terminate(self):
-        self._EasySeedLinkClient__streaming_started = False
-        self.close()
-
-        del self.conn
-        self.conn = SeedLinkConnection(timeout=30)
-        self.conn.set_sl_address('%s:%d' %
-                                 (self.server_hostname, self.server_port))
-        self.connect()
-
-    def on_seedlink_error(self):
-        self._EasySeedLinkClient__streaming_started = False
-        self.close()
-        self.streams = self.conn.streams.copy()
-        del self.conn
-        self.conn = SeedLinkConnection(timeout=30)
-        self.conn.set_sl_address('%s:%d' %
-                                 (self.server_hostname, self.server_port))
-        self.conn.streams = self.streams.copy()
-        self.run()
+            response = self.write_data_influx()
+            if response is True:
+                time.sleep(300)
+            else:
+                print('Something wrong went with Oracle Database. Retry sending data in 30s.')
+                time.sleep(30)
 
 
 # class SLThread(Thread):
@@ -260,15 +229,14 @@ def init_oracle_client(path_to_client):
 
 def get_arguments():
     """returns AttribDict with command line arguments"""
-    parser = argparse.ArgumentParser(
-        description='Launch a seedlink  and write the data into influxdb v2',
-        formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description='Query data from a Oracle and write the data into influxdb v2',
+                                     formatter_class=argparse.RawTextHelpFormatter)
 
     # Script functionalities
-    parser.add_argument('-s', '--server-sl', help='Path to SL server', required=True)
-    parser.add_argument('-p', '--port-sl', help='Port of the SL server')
+    parser.add_argument('-s', '--oracle-host', help='Path to Oracle server', required=True)
+    parser.add_argument('-p', '--oracle-port', help='Port of Oracle server', default='1522')
     parser.add_argument('-S', '--server-influx', help='Path of influx server', required=True)
-    parser.add_argument('-P', '--port-influx', help='Port of influx server')
+    parser.add_argument('-P', '--port-influx', help='Port of influx server', default='8086')
     parser.add_argument('-b', '--bucket', help='Name of the bucket', required=True)
     parser.add_argument('-o', '--org', help='Name of the organization', required=True)
     parser.add_argument('-t', '--token', help='Token authorization of influxdb', required=True)
@@ -276,15 +244,10 @@ def get_arguments():
 
     args = parser.parse_args()
 
-    if args.port_sl is None:
-        args.port_sl = '18000'
-    if args.port_influx is None:
-        args.port_influx = '8086'
-
-    print(f'Server SL: {args.server_sl} ; Port: {args.port_sl}')
+    print(f'Server Oracle: {args.oracle_host} ; Port: {args.oracle_port}')
     print(f'Server Influx: {args.server_influx} ; Port: {args.port_influx}')
     print("--------------------------\n"
-          "Starting Seedlink server and verifying Influx connection...")
+          "Starting Oracle server and verifying Influx connection...")
 
     return args
 
@@ -293,7 +256,7 @@ if __name__ == '__main__':
     args = get_arguments()
     init_oracle_client(CLIENT_ORACLE)
 
-    client = OracleInfluxClient(args.server_sl + ':' + args.port_sl, args.server_influx + ':' + args.port_influx,
-                                  args.bucket, args.token, args.org)
+    client = OracleInfluxClient(args.oracle_host, args.oracle_port, args.server_influx + ':' + args.port_influx,
+                                args.bucket, args.token, args.org)
 
     client.run()
